@@ -3,6 +3,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <type_traits>
 #include <unistd.h>
 #include <utility>
@@ -104,8 +105,7 @@ struct BytesOut {
   }
 };
 
-CStr read_file(char const* path) {
-  int fd = open(path, 0, O_RDONLY);
+CStr read_file(int fd) {
   check(fd >= 0);
 
   BytesOut out;
@@ -240,16 +240,24 @@ CStr path_join(char const* first, char const* second) {
   return {move(storage)};
 }
 
-void read_directory(char const* path) {
-  DIR* d = opendir(path);
+void read_directory(char const* path, long last_build_time) {
+  int dir_fd = open(path, O_RDONLY);
+  DIR* d = fdopendir(dir_fd);
   check(d);
 
   struct dirent* dir;
   while ((dir = readdir(d))) {
     if (ends_with(Str::from(dir->d_name), ".cc"_s)) {
-      CStr contents = read_file(path_join(path, dir->d_name));
-      write(STDERR_FILENO, contents.storage.data, contents.storage.size - 1);
-      parse_prototypes(contents);
+      int file_fd = openat(dir_fd, dir->d_name, O_RDONLY);
+      struct stat file_stat;
+      check(fstat(file_fd, &file_stat) == 0);
+
+      long file_time = file_stat.st_mtime;
+      if (last_build_time < file_time) {
+        printf("%s changed\n", dir->d_name);
+        CStr contents = read_file(file_fd);
+        parse_prototypes(contents);
+      }
     }
   }
   closedir(d);
@@ -257,4 +265,25 @@ void read_directory(char const* path) {
 
 }  // namespace
 
-int main() { read_directory("demo"); }
+#ifdef __APPLE__
+#ifndef st_mtime
+#define st_mtime st_mtimespec.tv_sec
+#endif
+#endif
+
+int main() {
+  struct stat info;
+
+  int stat_result = stat(".quick", &info);
+  printf("%d\n", stat_result);
+
+  long last_build_time = info.st_mtime;
+  printf("last build time was %ld\n", last_build_time);
+
+  read_directory("demo", last_build_time);
+
+  int index_fd = open(".quick", O_RDWR | O_CREAT | O_TRUNC, 644);
+  check(index_fd >= 0);
+  char c = 'x';
+  printf("%d\n", write(index_fd, &c, 1));
+}
